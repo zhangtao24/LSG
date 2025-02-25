@@ -5,6 +5,8 @@ table3 shows the scope of the study area*/
 var roi= table6;
 var region = roi.geometry().bounds()
 
+Map.centerObject(roi,10);
+
 //********************************************************************************Sentinel-2
 // remove cloud from Sentinel-2
 function rmS2cloud(image) {
@@ -186,7 +188,7 @@ var pc2 = pcImage.select('pc2');
 var pc3 = pcImage.select('pc3');
 
 // Principal component visualization
-Map.addLayer(pcImage, {bands: ['pc3', 'pc2', 'pc1'], min: -2, max: 2}, 'Sentinel 2 - PCA',false);
+Map.addLayer(pcImage, {bands: ['pc3', 'pc2', 'pc1'], min: -2, max: 2}, 'Sentinel 2 - PCA');
 
 
 //***************************************************************************DEM
@@ -259,6 +261,7 @@ var Points0 = MG_fas_sample.map(function(fea){
   return fea.set('landcover',0)
 })
 
+
 //The remaining 10 categories were automatically generated according to the same idea
 
 //**********************************************************************Phyllite (PH) 千枚岩1
@@ -328,7 +331,8 @@ var Points2 = MS_fa_sample.map(function(fea){
   return fea.set('landcover',2)
 })
 
-
+Map.addLayer(MS, {'palette':['#7a34d6']}, 'MS')
+Map.addLayer(Points2, {'palette':['green']}, 'Metaconglomerate and sandstone');
 //**********************************************************************Graphic granite (GG) 文象花岗岩3  
 var GG = table5.filter(ee.Filter.eq("YSEB", '文象花岗岩'));
 
@@ -609,7 +613,6 @@ var Points10 = GR_fa_sample.map(function(fea){
 //Combined samples from all 11 lithology classes
 var sample = ee.FeatureCollection([Points0,Points1,Points2,Points3,Points4,Points5,Points6,Points7,Points8,Points9,Points10]).flatten();
 print(sample.size());
-Map.addLayer(sample, {}, 'Sample')
 
 Export.table.toAsset(sample)
 
