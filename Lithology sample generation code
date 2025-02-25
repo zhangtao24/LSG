@@ -1,1 +1,615 @@
-212
+/*table5 is a geological map reconstructed based on rules(uploaded to GEE using Arcgis);
+table3 shows the scope of the study area*/
+
+
+var roi= table6;
+var region = roi.geometry().bounds()
+
+//********************************************************************************Sentinel-2
+// remove cloud from Sentinel-2
+function rmS2cloud(image) {
+  var qa = image.select('QA60');
+
+  // Bits 10 and 11 are clouds and cirrus, respectively.
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+  // var mask2 = image.select('B2').lte(2000);
+  return image.updateMask(mask).toDouble().divide(10000)
+              .copyProperties(image, ["system:time_start", "system:time_end"]);
+}
+
+var LL_clipped = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+                  .filterBounds(roi)
+                  .filterDate('2021-05-01','2021-10-30') 
+                  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',20))  //Cloud cover
+                  .select('B1','B2','B3','B4','B5','B6','B7','B8','B8A','B9','B11','B12','QA60')
+                  .map(rmS2cloud)
+                  .median()
+                  .clip(roi)
+                  
+Map.addLayer(LL_clipped, {bands: ['B4', 'B3', 'B2'], max: 0.5, gamma: 2}, 'S2 Image',false);
+
+//**********************************************************************************S2_glcm
+
+// compute glcm texture feature
+var S2_ray = LL_clipped.expression(
+      '(0.3 * NIR) + (0.59 * R) + (0.11 * G)', {
+      'NIR': LL_clipped.select('B8'),
+      'R': LL_clipped.select('B4'),
+      'G': LL_clipped.select('B3'),
+}).rename('S2');
+ 
+var S2glcm = S2_ray.unitScale(0,0.30).multiply(100).toInt().glcmTexture({size: 3,kernel:null});
+var S2_glcm = S2glcm.select('S2_asm','S2_contrast','S2_corr','S2_var','S2_idm','S2_sent','S2_ent')
+// print('glcm',S2_glcm)
+
+//***********************************************************************************landsat
+
+function rmCloud_TOA(image) {
+  var CloudScore = ee.Algorithms.Landsat.simpleCloudScore(image);
+  var image_rm =CloudScore.select("cloud").lte(30);
+  return image.updateMask(image_rm);
+}
+
+
+var l8SR = ee.ImageCollection('LANDSAT/LC08/C02/T1_TOA')
+                  .filterBounds(roi)
+                  .filterDate('2020-05-01','2020-10-30')
+                  .map(rmCloud_TOA)
+                  .select('B1','B2','B3','B4','B5','B6','B7','B8','B9','B10','B11')
+                  .median()   //Median synthesis
+                  .clip(roi)
+
+// print("l8SR",l8SR)
+
+var rgbVis = {
+  min: 0.0,
+  max: 0.3,
+  gamma: 1.4,
+  bands: ['B4', 'B3', 'B2'],
+};
+
+Map.addLayer(l8SR, rgbVis, 'l8SR',false);
+
+//B6/B7 ratio
+var b67 = l8SR.expression('(REDe / RED)', {
+        'REDe': l8SR.select('B6'),
+        'RED': l8SR.select('B7')})
+        .rename('red').float();
+        
+//B6/B4 ratio
+var b64 = l8SR.expression('(RED3 / RED2)', {
+        'RED3': l8SR.select('B6'),
+        'RED2': l8SR.select('B4')})
+        .rename('bule').float();
+        
+//B4/B2 ratio
+var b42 = l8SR.expression('(RED4 / RED5)', {
+        'RED4': l8SR.select('B4'),
+        'RED5': l8SR.select('B2')})
+        .rename('huagang').float();
+        
+//*********************************************************************************PCA
+
+var getNewBandNames = function(prefix) {
+    var seq = ee.List.sequence(1, bandNames.length());
+    return seq.map(function(b) {
+      return ee.String(prefix).cat(ee.Number(b).int());
+    });
+  };
+
+//Principal component analysis function
+var getPrincipalComponents = function(centered, scale, region) {
+    // The image is converted into a one-dimensional array
+    var arrays = centered.toArray();
+    // Calculate the correlation coefficient matrix
+    var covar = arrays.reduceRegion({
+      reducer: ee.Reducer.centeredCovariance(),
+      geometry: region,
+      scale: scale,
+      maxPixels: 1e9
+    });
+  
+    // Gets the "array" covariance result and converts it to an array
+    // Covariance between bands
+    var covarArray = ee.Array(covar.get('array'));
+  
+    // Perform feature analysis and segment values and vectors
+    var eigens = covarArray.eigen();
+
+    // The length of the p-vector of the eigenvalue
+    var eigenValues = eigens.slice(1, 0, 1);
+    
+    //Calculate the principal component load
+    var eigenValuesList = eigenValues.toList().flatten()
+    var total = eigenValuesList.reduce(ee.Reducer.sum())
+    var percentageVariance = eigenValuesList.map(function(item) {
+      return (ee.Number(item).divide(total)).multiply(100).format('%.2f')
+    })
+    
+    // print("各个主成分的所占总信息量比例", percentageVariance)  
+      
+    // PxP matrix, whose eigenvectors are rows.
+    var eigenVectors = eigens.slice(1, 1);
+    
+    // Convert the image to a two-dimensional array
+    var arrayImage = arrays.toArray(1);
+    
+    //The image array is left multiplied by the eigenvector matrix
+    var principalComponents = ee.Image(eigenVectors).matrixMultiply(arrayImage);
+
+    // Convert the square root of the eigenvalues to a P-band image.
+    var sdImage = ee.Image(eigenValues.sqrt())
+      .arrayProject([0]).arrayFlatten([getNewBandNames('sd')]);
+      
+    //Convert PC to P-band image, standardized by SD.
+    principalComponents=principalComponents
+      // Throw an unwanted dimension, [[]]->[]。
+      .arrayProject([0])
+      // Make the single band array image a multi-band image,[]->image。
+      .arrayFlatten([getNewBandNames('pc')])
+      // Normalize PC with SDs.
+      .divide(sdImage);
+    return principalComponents
+  };
+
+
+//Band selection for principal component analysis is required
+var bands1=["B2","B3","B4","B8",'B8A',"B11","B12"]
+var LL_clipped1 =LL_clipped.select(bands1)
+
+// Enter parameter Settings to the principal component function
+var region = roi;
+var image =  LL_clipped1.select(bands1);
+var scale = 60;
+var bandNames = image.bandNames();
+
+//Data averaging (to facilitate subsequent covariance reduction and SD extension)
+var meanDict = image.reduceRegion({
+    reducer: ee.Reducer.mean(),
+    geometry: region,
+    scale: scale,
+    maxPixels: 1e9
+});
+var means = ee.Image.constant(meanDict.values(bandNames));
+var centered = image.subtract(means);
+
+//Principal component analysis was carried out and the analysis results were obtained
+var pcImage = getPrincipalComponents(centered, scale, region);
+
+var pc1 = pcImage.select('pc1');
+var pc2 = pcImage.select('pc2');
+var pc3 = pcImage.select('pc3');
+
+// Principal component visualization
+Map.addLayer(pcImage, {bands: ['pc3', 'pc2', 'pc1'], min: -2, max: 2}, 'Sentinel 2 - PCA',false);
+
+
+//***************************************************************************DEM
+//Get dem data
+var dataset = ee.Image('USGS/SRTMGL1_003')
+                .clip(roi);
+var terrain = ee.Algorithms.Terrain(dataset);
+
+var l8SR1 = l8SR.addBands(b64).addBands(b67).addBands(b42);
+
+var LL_clipped1=ee.Image.cat([l8SR1,LL_clipped,pcImage,terrain])
+print(LL_clipped1)
+
+
+var bands = ['B1','B2', 'B3', 'B4', 'B5', 'B6', 
+'B7','B8','B10','B9','B11','elevation','slope','aspect','hillshade','B1_1','B2_1','B3_1','B4_1','B5_1'
+,'B6_1','B7_1','B8_1','B8A','B9_1','B11_1','B12','pc1','pc2','pc3'];
+
+
+// Define visual parameters
+var displayVis = {
+  min: 0,
+  max: 1,
+  palette: ['blue']  
+};
+
+/*Automatic sample point generation for each lithology class starts here. 
+It should be noted that 1200 sample points were generated for each category, 
+and a total of 13,200 training data were generated for 14 categories. 
+The number of sample points generated can be customized according to your needs.
+*/
+
+//**********************************************************************Monzogranite (MG) 二长花岗岩0 
+
+//Get the MG in T1
+var MG = table5.filter(ee.Filter.eq("YSEB", '二长花岗岩'));
+
+//PCA three-dimensional space threshold segmentation
+var MG1 = pc1.gt(-1.5).and(pc1.lte(-1))
+              .and(pc2.gt(-2)).and(pc2.lt(0))
+              .and(pc3.gt(-2)).and(pc3.lt(2)).selfMask(); 
+
+//BR three-dimensional space threshold segmentation
+var MG2 = b67.gt(1.05).and(b67.lte(1.12))
+              .and(b64.gt(1.3)).and(b64.lt(1.54))
+              .and(b42.gt(1.26)).and(b42.lt(1.5)).selfMask();  
+
+//Refinement strategy 1: u±m
+var MG_um = pc1.gt(-1.56).and(pc1.lte(-0.87)).selfMask(); 
+
+var MG_fa = MG1.and(MG2).and(MG_um).clip(MG);
+
+//Refinement strategy 2:Refinement strategy 1: Retain more than 10 connected pixels
+var MG_mask = MG_fa.updateMask(
+  MG_fa.selfMask()  
+    .connectedPixelCount(10, false) 
+    .gte(10)  // Only small patches with more than 10 pixels are retained
+);
+
+//Customize the number of generated samples
+var MG_fas_sample = MG_mask.stratifiedSample({
+
+    numPoints: 1200, //Can be modified as required
+    region: region,
+    scale: 30,
+    geometries: true 
+});
+
+var Points0 = MG_fas_sample.map(function(fea){
+  return fea.set('landcover',0)
+})
+
+//The remaining 10 categories were automatically generated according to the same idea
+
+//**********************************************************************Phyllite (PH) 千枚岩1
+var PH = table5.filter(ee.Filter.eq("YSEB", '千枚岩'));
+
+var PH1 = pc1.gt(0.5).and(pc1.lte(1.5))
+              .and(pc2.gt(0)).and(pc2.lt(2))
+              .and(pc3.gt(0.3)).and(pc3.lt(2)).selfMask(); 
+
+var PH2 = b67.gt(0.85).and(b67.lte(1.05))
+              .and(b64.gt(1.35)).and(b64.lt(1.6))
+              .and(b42.gt(0.95)).and(b42.lt(1.15)).selfMask();  
+               
+var PH_um = pc1.gt(0.67).and(pc1.lte(1.51)).selfMask(); 
+
+var PH_fa = PH1.and(PH2).and(PH_um).clip(PH);
+
+var PH_mask = PH_fa.updateMask(
+  PH_fa.selfMask() 
+    .connectedPixelCount(10, false) 
+    .gte(10) 
+);
+
+var PH_fas_sample = PH_mask.stratifiedSample({
+  
+    numPoints: 1200, 
+    region: region,
+    scale: 30,
+    geometries: true 
+  
+});
+var Points1 = PH_fas_sample.map(function(fea){
+  return fea.set('landcover',1)
+})
+
+
+//**********************************************************************Metaconglomerate and sandstone (MS) 变质砾岩、砂岩2 
+var MS = table5.filter(ee.Filter.eq("YSEB", '变质砾岩、砂岩'));
+
+var MS1 = pc1.gt(1.5).and(pc1.lte(3))
+              .and(pc2.gt(-2)).and(pc2.lt(0))
+              .and(pc3.gt(-2)).and(pc3.lt(-0.4)).selfMask(); 
+
+var MS2 = b67.gt(1.04).and(b67.lte(1.16))
+              .and(b64.gt(1.1)).and(b64.lt(1.5))
+              .and(b42.gt(0.9)).and(b42.lt(1.1)).selfMask();  
+               
+var MS_um = pc1.gt(1.46).and(pc1.lte(2.73)).selfMask(); 
+               
+var MS_fa = MS1.and(MS2).and(MS_um).clip(MS)
+
+var MS_mask = MS_fa.updateMask(
+  MS_fa.selfMask()  
+    .connectedPixelCount(10, false) 
+    .gte(10) 
+);
+
+var MS_fa_sample = MS_mask.stratifiedSample({
+  
+    numPoints: 1200, 
+    region: region,
+    scale: 30,
+    geometries: true 
+  
+});
+var Points2 = MS_fa_sample.map(function(fea){
+  return fea.set('landcover',2)
+})
+
+
+//**********************************************************************Graphic granite (GG) 文象花岗岩3  
+var GG = table5.filter(ee.Filter.eq("YSEB", '文象花岗岩'));
+
+var GG1 = pc1.gt(-1).and(pc1.lte(0.5))
+              .and(pc2.gt(-0.9)).and(pc2.lt(0.25))
+              .and(pc3.gt(-3.5)).and(pc3.lt(-1.75)).selfMask(); 
+
+var GG2 = b67.gt(1).and(b67.lte(1.13))
+              .and(b64.gt(1.35)).and(b64.lt(1.5))
+              .and(b42.gt(1.2)).and(b42.lt(1.6)).selfMask();  
+              
+var GG_um = pc1.gt(-0.76).and(pc1.lte(0.42)).selfMask(); 
+               
+var GG_fa = GG1.and(GG2).and(GG_um).clip(GG);
+
+var GG_mask = GG_fa.updateMask(
+  GG_fa.selfMask()  
+    .connectedPixelCount(10, false)  
+    .gte(10) 
+);
+
+var GG_fas_sample = GG_mask.stratifiedSample({
+  
+  numPoints: 1200, 
+    region: region,
+    scale: 30,
+    geometries: true  
+});
+
+var Points3 = GG_fas_sample.map(function(fea){
+  return fea.set('landcover',3)
+})
+
+
+//**********************************************************************Plagioclase gneiss (PLG) 斜长片麻岩4  
+var PLG = table5.filter(ee.Filter.eq("YSEB", '斜长片麻岩'));
+
+var PLG1 = pc1.gt(-0.9).and(pc1.lte(0.5))
+              .and(pc2.gt(0.5)).and(pc2.lt(2))
+              .and(pc3.gt(-0.4)).and(pc3.lt(1.5)).selfMask(); 
+
+var PLG2 = b67.gt(0.97).and(b67.lte(1.15))
+              .and(b64.gt(1.5)).and(b64.lt(1.7))
+              .and(b42.gt(1.15)).and(b42.lt(1.35)).selfMask();  
+
+var PLG_um = pc1.gt(-0.72).and(pc1.lte(0.18)).selfMask(); 
+
+var PLG_fa = PLG1.and(PLG2).and(PLG_um).clip(PLG);
+
+var PLG_mask = PLG_fa.updateMask(
+  PLG_fa.selfMask()  
+    .connectedPixelCount(10, false) 
+    .gte(10)  
+);
+
+var PLG_fa_sample = PLG_mask.stratifiedSample({
+  
+    numPoints: 1200, 
+    region: region,
+    scale: 30,
+    geometries: true 
+});
+
+var Points4 = PLG_fa_sample.map(function(fea){
+  return fea.set('landcover',4)
+})
+
+
+//**********************************************************************Plagiogranite (PL) 斜长花岗岩5  
+var PL = table5.filter(ee.Filter.eq("YSEB", '斜长花岗岩'));
+
+var PL1 = pc1.gt(-1.2).and(pc1.lte(0.5))
+              .and(pc2.gt(-1)).and(pc2.lt(1.5))
+              .and(pc3.gt(-1)).and(pc3.lt(1)).selfMask(); 
+
+var PL2 = b67.gt(1.02).and(b67.lte(1.11))
+              .and(b64.gt(1.4)).and(b64.lt(1.65))
+              .and(b42.gt(1.2)).and(b42.lt(1.38)).selfMask();  
+
+var PL_um = pc1.gt(-1.05).and(pc1.lte(0.03)).selfMask(); 
+
+var PL_fa = PL1.and(PL2).and(PL_um).clip(PL);
+
+var PL_mask = PL_fa.updateMask(
+  PL_fa.selfMask()  
+    .connectedPixelCount(10, false)  
+    .gte(10)  
+);
+
+var PL_fa_sample = PL_mask.stratifiedSample({
+  
+    numPoints: 1200, 
+    region: region,
+    scale: 30,
+    geometries: true 
+});
+
+var Points5 = PL_fa_sample.map(function(fea){
+  return fea.set('landcover',5)
+  
+})
+
+//**********************************************************************Rhyolite porphyry (RG) 流纹斑岩6 
+var RG = table5.filter(ee.Filter.eq("YSEB", '流纹斑岩'));
+
+var RG1 = pc1.gt(1).and(pc1.lte(2))
+              .and(pc2.gt(-1.5)).and(pc2.lt(2))
+              .and(pc3.gt(-0.75)).and(pc3.lt(1)).selfMask(); 
+
+var RG2 = b67.gt(0.9).and(b67.lte(1.1))
+              .and(b64.gt(1.2)).and(b64.lt(1.6))
+              .and(b42.gt(0.95)).and(b42.lt(1.15)).selfMask();  
+
+var RG_um = pc1.gt(1).and(pc1.lte(1.99)).selfMask(); 
+
+var RG_fa = RG1.and(RG2).and(RG_um).clip(RG);
+
+var RG_mask = RG_fa.updateMask(
+  RG_fa.selfMask() 
+    .connectedPixelCount(10, false)
+    .gte(10) 
+);
+
+var RG_fa_sample = RG_mask.stratifiedSample({
+  
+    numPoints: 1200, 
+    region: region,
+    scale: 30,
+    geometries: true 
+});
+
+var Points6 = RG_fa_sample.map(function(fea){
+  return fea.set('landcover',6)
+  
+})
+
+
+
+//**********************************************************************Silty slate and sandstone (SS) 粉砂质板岩、砂岩7 
+var SS = table5.filter(ee.Filter.eq("YSEB", '粉砂质板岩、砂岩'));
+
+var SS1 = pc1.gt(1.5).and(pc1.lte(3))
+              .and(pc2.gt(-3)).and(pc2.lt(-1.75))
+              .and(pc3.gt(-0.5)).and(pc3.lt(0.8)).selfMask(); 
+
+var SS2 = b67.gt(1.1).and(b67.lte(1.19))
+              .and(b64.gt(0.9)).and(b64.lt(1.27))
+              .and(b42.gt(0.82)).and(b42.lt(1.08)).selfMask();  
+
+var SS_um = pc1.gt(1.53).and(pc1.lte(2.72)).selfMask(); 
+
+var SS_fa = SS1.and(SS2).and(SS_um).clip(SS);
+
+var SS_mask = SS_fa.updateMask(
+  SS_fa.selfMask()  
+    .connectedPixelCount(10, false) 
+    .gte(10) 
+);
+
+var SS_fa_sample = SS_mask.stratifiedSample({
+  
+    numPoints: 1200, 
+    region: region,
+    scale: 30,
+    geometries: true 
+});
+
+var Points7 = SS_fa_sample.map(function(fea){
+  return fea.set('landcover',7)
+  
+})
+
+var styling={color:'red',fillColor:'00000000'}
+
+
+//**********************************************************************Argillite and sandstone (AS) 粘土岩、砂岩8 
+var AS = table5.filter(ee.Filter.eq("YSEB",'粘土岩-砂岩'));
+
+var AS1 = pc1.gt(-1.5).and(pc1.lte(1))
+              .and(pc2.gt(-0.5)).and(pc2.lt(1))
+              .and(pc3.gt(-0.5)).and(pc3.lt(0.5)).selfMask(); 
+
+var AS2 = b67.gt(1).and(b67.lte(1.11))
+              .and(b64.gt(1.42)).and(b64.lt(1.55))
+              .and(b42.gt(1.15)).and(b42.lt(1.45)).selfMask();  
+
+var AS_um = pc1.gt(-1.46).and(pc1.lte(-0.03)).selfMask(); 
+
+var AS_fa = AS1.and(AS2).and(AS_um).clip(AS);
+
+var AS_mask = AS_fa.updateMask(
+  AS_fa.selfMask() 
+    .connectedPixelCount(10, false)  
+    .gte(10)  
+);
+
+var AS_fa_sample = AS_mask.stratifiedSample({
+  
+    numPoints: 1200, 
+    region: region,
+    scale: 30,
+    geometries: true 
+});
+
+var Points8 = AS_fa_sample.map(function(fea){
+  return fea.set('landcover',8)
+  
+})
+
+
+
+//**********************************************************************Potassic granite (POG) 钾长花岗岩9
+var POG = table5.filter(ee.Filter.eq("YSEB",'钾长花岗岩'));
+
+var POG1 = pc1.gt(-0.4).and(pc1.lte(0.8))
+              .and(pc2.gt(-0.8)).and(pc2.lt(1))
+              .and(pc3.gt(-2.5)).and(pc3.lt(-1.25)).selfMask(); 
+
+var POG2 = b67.gt(1.03).and(b67.lte(1.17))
+              .and(b64.gt(1.4)).and(b64.lt(1.6))
+              .and(b42.gt(1.27)).and(b42.lt(1.43)).selfMask();  
+
+var POG_um = pc1.gt(-0.16).and(pc1.lte(0.62)).selfMask(); 
+
+var POG_fa = POG1.and(POG2).and(POG_um).clip(POG);
+
+var POG_mask = POG_fa.updateMask(
+  POG_fa.selfMask() 
+    .connectedPixelCount(10, false) 
+    .gte(10)  
+);
+
+var POG_fa_sample = POG_mask.stratifiedSample({
+  
+    numPoints: 1200, 
+    region: region,
+    scale: 30,
+    geometries: true 
+});
+
+var Points9 = POG_fa_sample.map(function(fea){
+  return fea.set('landcover',9)
+  })
+
+//**********************************************************************Granodiorite (GR) 花岗闪长岩10
+var GR = table5.filter(ee.Filter.eq("YSEB",'花岗闪长岩'));
+
+var GR1 = pc1.gt(-0.25).and(pc1.lte(1.25))
+              .and(pc2.gt(0)).and(pc2.lt(1.5))
+              .and(pc3.gt(-1.5)).and(pc3.lt(0.5)).selfMask(); 
+
+var GR2 = b67.gt(0.97).and(b67.lte(1.1))
+              .and(b64.gt(1.41)).and(b64.lt(1.64))
+              .and(b42.gt(1.1)).and(b42.lt(1.38)).selfMask();  
+
+var GR_um = pc1.gt(-0.07).and(pc1.lte(1.08)).selfMask(); 
+
+var GR_fa = GR1.and(GR2).and(GR_um).clip(GR);
+
+var GR_mask = GR_fa.updateMask(
+  GR_fa.selfMask() 
+    .connectedPixelCount(10, false) 
+    .gte(10) 
+);
+
+var GR_fa_sample = GR_mask.stratifiedSample({
+  
+    numPoints: 1200, 
+    region: region,
+    scale: 30,
+    geometries: true 
+});
+
+var Points10 = GR_fa_sample.map(function(fea){
+  return fea.set('landcover',10)
+  })
+
+//Combined samples from all 11 lithology classes
+var sample = ee.FeatureCollection([Points0,Points1,Points2,Points3,Points4,Points5,Points6,Points7,Points8,Points9,Points10]).flatten();
+print(sample.size());
+Map.addLayer(sample, {}, 'Sample')
+
+Export.table.toAsset(sample)
+
