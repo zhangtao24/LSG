@@ -1,1 +1,1 @@
-# Lithologic-sample-generation
+#LSG
