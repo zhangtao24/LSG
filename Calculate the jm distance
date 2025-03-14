@@ -1,0 +1,185 @@
+Map.centerObject(roi,7);
+
+//********************************************************************************Sentinel-2
+// remove cloud from Sentinel-2
+function rmS2cloud(image) {
+  var qa = image.select('QA60');
+
+  // Bits 10 and 11 are clouds and cirrus, respectively.
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+  // var mask2 = image.select('B2').lte(2000);
+  return image.updateMask(mask).toDouble().divide(10000)
+              .copyProperties(image, ["system:time_start", "system:time_end"]);
+}
+
+var LL_clipped = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+                  .filterBounds(roi)
+                  .filterDate('2021-05-01','2021-10-30') 
+                  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',20))  //Cloud cover
+                  .select('B1','B2','B3','B4','B5','B6','B7','B8','B8A','B9','B11','B12','QA60')
+                  .map(rmS2cloud)
+                  .median()
+                  .clip(roi)
+                  
+Map.addLayer(LL_clipped, {bands: ['B4', 'B3', 'B2'], max: 0.5, gamma: 2}, 'S2 Image',false);
+
+//***********************************************************************************landsat
+
+function rmCloud_TOA(image) {
+  var CloudScore = ee.Algorithms.Landsat.simpleCloudScore(image);
+  var image_rm =CloudScore.select("cloud").lte(30);
+  return image.updateMask(image_rm);
+}
+
+
+var l8SR = ee.ImageCollection('LANDSAT/LC08/C02/T1_TOA')
+                  .filterBounds(roi)
+                  .filterDate('2020-05-01','2020-10-30')
+                  .map(rmCloud_TOA)
+                  .select('B1','B2','B3','B4','B5','B6','B7','B8','B9','B10','B11')
+                  .median()   //Median synthesis
+                  .clip(roi)
+
+// print("l8SR",l8SR)
+
+var rgbVis = {
+  min: 0.0,
+  max: 0.3,
+  gamma: 1.4,
+  bands: ['B4', 'B3', 'B2'],
+};
+
+Map.addLayer(l8SR, rgbVis, 'l8SR',false);
+
+//B6/B7 ratio
+var b67 = l8SR.expression('(REDe / RED)', {
+        'REDe': l8SR.select('B6'),
+        'RED': l8SR.select('B7')})
+        .rename('red').float();
+        
+//B6/B4 ratio
+var b64 = l8SR.expression('(RED3 / RED2)', {
+        'RED3': l8SR.select('B6'),
+        'RED2': l8SR.select('B4')})
+        .rename('bule').float();
+        
+//B4/B2 ratio
+var b42 = l8SR.expression('(RED4 / RED5)', {
+        'RED4': l8SR.select('B4'),
+        'RED5': l8SR.select('B2')})
+        .rename('huagang').float();
+        
+//***************************************************************************DEM
+//Get dem data
+var dataset = ee.Image('USGS/SRTMGL1_003')
+                .clip(roi);
+var terrain = ee.Algorithms.Terrain(dataset);
+
+var l8SR1 = l8SR.addBands(b64).addBands(b67).addBands(b42);
+        
+//Merge S2 and L8 
+var LL_clipped1=ee.Image.cat([LL_clipped,l8SR1,terrain])
+
+
+
+var bands = ['B1','B2', 'B3', 'B4', 'B5', 'B6', 
+'B7','B8','B10','B9','B11','elevation','slope','aspect','hillshade','B1_1','B2_1','B3_1','B4_1','B5_1'
+,'B6_1','B7_1','B8_1','B8A','B9_1','B11_1','B12','bule','red','huagang'];
+
+var training = LL_clipped1.select(bands).sampleRegions({
+  collection: sample6, 
+  properties: ['landcover'], 
+  scale: 10
+});
+
+training = training.map(function(f) {
+
+  return f.set('vec', f.toDictionary(bands).values(bands));
+})
+
+
+var lists = ee.List(training.reduceColumns({
+  reducer: ee.Reducer.toList().group(0, 'landcover'), 
+  selectors: ['landcover', 'vec']
+}).get('groups'));
+
+lists = lists.map(function(obj) {
+  var array = ee.Array(ee.Dictionary(obj).get('list'));
+  var list = ee.List(ee.Dictionary(obj).get('list')).map(function(l) {
+    return ee.Array(l)
+  });
+  var mean = array.reduce(ee.Reducer.mean(), [0]);
+
+  var covariance = list.reduce(ee.Reducer.covariance());
+  return ee.Dictionary(obj).combine({
+    mean: mean.transpose(),
+    covariance: covariance
+  })
+});
+
+//Since this study is of 11 categories, 0,10. You can customize it according to your needs
+var classes = ee.List.sequence(0,10);
+var block = classes.map(function(i) {
+  return classes.map(function(j) {
+    var mean_i = ee.Array(ee.Dictionary(lists.get(i)).get('mean'));
+    var mean_j = ee.Array(ee.Dictionary(lists.get(j)).get('mean'));
+    return mean_i.subtract(mean_j).reduce('sum', [0]).project([0])
+  })
+})
+var euclidean = classes.map(function(i) {
+  return classes.map(function(j) {
+    var mean_i = ee.Array(ee.Dictionary(lists.get(i)).get('mean'));
+    var mean_j = ee.Array(ee.Dictionary(lists.get(j)).get('mean'));
+    var diff = mean_i.subtract(mean_j).project([0]);
+    return diff.dotProduct(diff).sqrt();
+  })
+})
+var angular = classes.map(function(i) {
+  return classes.map(function(j) {
+    var mean_i = ee.Array(ee.Dictionary(lists.get(i)).get('mean')).project([0]);
+    var mean_j = ee.Array(ee.Dictionary(lists.get(j)).get('mean')).project([0]);
+    return mean_i.dotProduct(mean_j)
+        .divide(mean_i.dotProduct(mean_i).sqrt())
+        .divide(mean_j.dotProduct(mean_j).sqrt())
+        .acos()
+  })
+})
+var mahalanobis = classes.map(function(i) {
+  return classes.map(function(j) {
+    var mean_i = ee.Array(ee.Dictionary(lists.get(i)).get('mean'));
+    var mean_j = ee.Array(ee.Dictionary(lists.get(j)).get('mean'));
+    var sigma_i = ee.Array(ee.Dictionary(lists.get(i)).get('covariance'));
+    var sigma_j = ee.Array(ee.Dictionary(lists.get(j)).get('covariance'));
+    return mean_i.subtract(mean_j).transpose() // 1x6
+        .matrixMultiply(sigma_i.add(sigma_j).divide(2).matrixInverse()) // 6x6
+        .matrixMultiply(mean_i.subtract(mean_j))
+        .get([0, 0])
+  })
+})
+var bhattacharyya = classes.map(function(i) {
+  return classes.map(function(j) {
+    var mean_i = ee.Array(ee.Dictionary(lists.get(i)).get('mean'));
+    var mean_j = ee.Array(ee.Dictionary(lists.get(j)).get('mean'));
+    var sigma_i = ee.Array(ee.Dictionary(lists.get(i)).get('covariance'));
+    var sigma_j = ee.Array(ee.Dictionary(lists.get(j)).get('covariance'));
+    var mh = mean_i.subtract(mean_j).transpose()
+        .matrixMultiply(sigma_i.add(sigma_j).divide(2).matrixInverse())
+        .matrixMultiply(mean_i.subtract(mean_j))
+        .get([0, 0])
+        .sqrt();
+    var t2 = sigma_i.add(sigma_j).divide(2).matrixDeterminant()
+        .divide(sigma_i.matrixDeterminant().sqrt())
+        .divide(sigma_j.matrixDeterminant().sqrt())
+        .log()
+        .divide(2);
+    return mh.divide(8).add(t2)
+  })
+})
+var jm = ee.Array(bhattacharyya).multiply(-1).exp()
+    .multiply(-1).add(1).multiply(2)
+print('jm', jm)
