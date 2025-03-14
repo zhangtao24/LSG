@@ -35,20 +35,6 @@ var LL_clipped = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
                   
 Map.addLayer(LL_clipped, {bands: ['B4', 'B3', 'B2'], max: 0.5, gamma: 2}, 'S2 Image',false);
 
-//**********************************************************************************S2_glcm
-
-// compute glcm texture feature
-var S2_ray = LL_clipped.expression(
-      '(0.3 * NIR) + (0.59 * R) + (0.11 * G)', {
-      'NIR': LL_clipped.select('B8'),
-      'R': LL_clipped.select('B4'),
-      'G': LL_clipped.select('B3'),
-}).rename('S2');
- 
-var S2glcm = S2_ray.unitScale(0,0.30).multiply(100).toInt().glcmTexture({size: 3,kernel:null});
-var S2_glcm = S2glcm.select('S2_asm','S2_contrast','S2_corr','S2_var','S2_idm','S2_sent','S2_ent')
-// print('glcm',S2_glcm)
-
 //***********************************************************************************landsat
 
 function rmCloud_TOA(image) {
@@ -205,8 +191,7 @@ print(LL_clipped1)
 
 var bands = ['B1','B2', 'B3', 'B4', 'B5', 'B6', 
 'B7','B8','B10','B9','B11','elevation','slope','aspect','hillshade','B1_1','B2_1','B3_1','B4_1','B5_1'
-,'B6_1','B7_1','B8_1','B8A','B9_1','B11_1','B12','pc1','pc2','pc3'];
-
+,'B6_1','B7_1','B8_1','B8A','B9_1','B11_1','B12','bule','red','huagang','pc1','pc2','pc3'];
 
 // Define visual parameters
 var displayVis = {
