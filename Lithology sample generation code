@@ -202,7 +202,7 @@ var displayVis = {
 
 /*Automatic sample point generation for each lithology class starts here. 
 It should be noted that 1200 sample points were generated for each category, 
-and a total of 13,200 training data were generated for 14 categories. 
+and a total of 13,200 training data were generated for 11 categories. 
 The number of sample points generated can be customized according to your needs.
 */
 
