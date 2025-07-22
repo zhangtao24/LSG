@@ -1,5 +1,3 @@
-Map.centerObject(roi,7);
-
 //********************************************************************************Sentinel-2
 // remove cloud from Sentinel-2
 function rmS2cloud(image) {
