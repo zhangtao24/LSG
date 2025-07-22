@@ -8,7 +8,6 @@ from sklearn.ensemble import RandomForestClassifier
 from sklearn.datasets import make_classification
 from sklearn.model_selection import cross_val_score
 
-
 csvdata = pd.read_csv(r"D:\studysoft\python_project\paper2_RFE\100.csv")
 
 featureName = []
