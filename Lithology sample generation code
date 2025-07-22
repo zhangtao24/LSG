@@ -1,21 +1,16 @@
 /*table5 is a geological map reconstructed based on rules(uploaded to GEE using Arcgis);
 table3 shows the scope of the study area*/
 
-
 var roi= table6;
 var region = roi.geometry().bounds()
-
 Map.centerObject(roi,10);
-
 //********************************************************************************Sentinel-2
 // remove cloud from Sentinel-2
 function rmS2cloud(image) {
   var qa = image.select('QA60');
-
   // Bits 10 and 11 are clouds and cirrus, respectively.
   var cloudBitMask = 1 << 10;
   var cirrusBitMask = 1 << 11;
-
   // Both flags should be set to zero, indicating clear conditions.
   var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
       .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
@@ -36,14 +31,11 @@ var LL_clipped = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
 Map.addLayer(LL_clipped, {bands: ['B4', 'B3', 'B2'], max: 0.5, gamma: 2}, 'S2 Image',false);
 
 //***********************************************************************************landsat
-
 function rmCloud_TOA(image) {
   var CloudScore = ee.Algorithms.Landsat.simpleCloudScore(image);
   var image_rm =CloudScore.select("cloud").lte(30);
   return image.updateMask(image_rm);
 }
-
-
 var l8SR = ee.ImageCollection('LANDSAT/LC08/C02/T1_TOA')
                   .filterBounds(roi)
                   .filterDate('2020-05-01','2020-10-30')
@@ -51,7 +43,6 @@ var l8SR = ee.ImageCollection('LANDSAT/LC08/C02/T1_TOA')
                   .select('B1','B2','B3','B4','B5','B6','B7','B8','B9','B10','B11')
                   .median()   //Median synthesis
                   .clip(roi)
-
 // print("l8SR",l8SR)
 
 var rgbVis = {
@@ -60,7 +51,6 @@ var rgbVis = {
   gamma: 1.4,
   bands: ['B4', 'B3', 'B2'],
 };
-
 Map.addLayer(l8SR, rgbVis, 'l8SR',false);
 
 //B6/B7 ratio
@@ -82,6 +72,7 @@ var b42 = l8SR.expression('(RED4 / RED5)', {
         .rename('huagang').float();
         
 //*********************************************************************************PCA
+var bands1=["B2","B3","B4","B8","B11","B12"]
 
 // 定义一个函数，用于对矢量进行矩形分块
 function shpRectBlock(vector, numHorizontal, numVertical) {  
@@ -89,8 +80,6 @@ function shpRectBlock(vector, numHorizontal, numVertical) {  
   if (!(vector instanceof ee.Geometry || vector instanceof ee.Feature || vector instanceof ee.FeatureCollection)) {  
     throw new Error('Input must be a Geometry, Feature, or FeatureCollection.');  
   }  
-
-
   // 如果是 FeatureCollection，提取其几何  
   if (vector instanceof ee.FeatureCollection) {  
     vector = vector.geometry();  
@@ -101,7 +90,6 @@ function shpRectBlock(vector, numHorizontal, numVertical) {  
   else {
     vector = vector;
   }
-
   // 获取矢量的边界框  
   var bounds = vector.bounds();  
   var coords = ee.List(bounds.coordinates().get(0)); // 获取边界框的坐标  
@@ -110,11 +98,9 @@ function shpRectBlock(vector, numHorizontal, numVertical) {  
   var xmax = ee.Number(ee.List(coords.get(2)).get(0));  
   var ymax = ee.Number(ee.List(coords.get(2)).get(1));  
 
-
   // 计算每个矩形块的宽度和高度  
   var xStep = xmax.subtract(xmin).divide(numHorizontal);  
   var yStep = ymax.subtract(ymin).divide(numVertical);  
-
 
   // 创建矩形块  
   var rectangles = ee.List.sequence(0, numHorizontal - 1).map(function (i) {  
@@ -130,21 +116,16 @@ function shpRectBlock(vector, numHorizontal, numVertical) {  
     });  
   }).flatten();  
 
-
   // 将矩形块转换为 FeatureCollection  
   var rectanglesFC = ee.FeatureCollection(rectangles).filterBounds(vector);  
 
-
   return rectanglesFC;  
 }
-
 function pca (img) {
     var bandNames = bands1;
     var scale = 60;
     var region = roi;
     var year = img.get('year');
-
-
     var meanDict = img.reduceRegion({
         reducer: ee.Reducer.mean(),
         geometry: region,
@@ -153,8 +134,6 @@ function pca (img) {
     });
     var means = ee.Image.constant(meanDict.values(bandNames));
     var centered = img.subtract(means);
-
-
     var getNewBandNames = function(prefix) {
         var seq = ee.List.sequence(1, 6);
         return seq.map(function(n) {
@@ -162,14 +141,11 @@ function pca (img) {
         });
     };
 
-
     var getPrincipalComponents = function(centered, scale, region) {
         var arrays = centered.toArray();
         // 添加波段权重
         var weights = ee.Array([1, 1, 1, 1, 2 ,2]); // 根据实际波段数量调整
         arrays = arrays.multiply(weights);
-
-
         var covar = arrays.reduceRegion({
             reducer: ee.Reducer.centeredCovariance(),
             geometry: region,
@@ -182,23 +158,15 @@ function pca (img) {
         var eigens = covarArray.eigen();
         var eigenValues = eigens.slice(1, 0, 1);
         var eigenVectors = eigens.slice(1, 1);
-
-
         var eigenValuesList = eigenValues.toList().flatten();
         var total = eigenValuesList.reduce(ee.Reducer.sum());
         var percentageVariance = eigenValuesList.map(function(item) {
             return (ee.Number(item).divide(total)).multiply(100).format('%.2f');
         });
-
-
         var arrayImage = arrays.toArray(1);
         var principalComponents = ee.Image(eigenVectors).matrixMultiply(arrayImage);
-
-
         var sdImage = ee.Image(eigenValues.sqrt())
             .arrayProject([0]).arrayFlatten([getNewBandNames('SD')]);
-
-
         return principalComponents
             .arrayProject([0])
             .arrayFlatten([getNewBandNames('PC', bandNames)])
@@ -207,7 +175,6 @@ function pca (img) {
             .set('eigenVectors', eigenVectors)
             .set('各个主成分的所占总信息量比例', percentageVariance);
     };
-
     img = getPrincipalComponents(centered,scale, region);
     return img;
 }
@@ -223,7 +190,7 @@ var B11 = l8SR.select('B11');
 Map.addLayer(
   pcImage, 
   {bands: ['PC3', 'PC2', 'PC1'], min: -2, max: 2}, 
-  'Landsat 8 - PCA', 
+  'PCA', 
   false
 );
 
@@ -232,12 +199,9 @@ Map.addLayer(
 var dataset = ee.Image('USGS/SRTMGL1_003')
                 .clip(roi);
 var terrain = ee.Algorithms.Terrain(dataset);
-
 var l8SR1 = l8SR.addBands(b64).addBands(b67).addBands(b42);
-
 var LL_clipped1=ee.Image.cat([l8SR1,LL_clipped,pcImage,terrain])
 print(LL_clipped1)
-
 
 var bands = ['B1','B2', 'B3', 'B4', 'B5', 'B6', 
 'B7','B8','B10','B9','B11','elevation','slope','aspect','hillshade','B1_1','B2_1','B3_1','B4_1','B5_1'
@@ -257,7 +221,6 @@ The number of sample points generated can be customized according to your needs.
 */
 
 //**********************************************************************Monzogranite (MG) 二长花岗岩0 
-
 //Get the MG in T1
 var MG = table5.filter(ee.Filter.eq("YSEB", '二长花岗岩'));
 
@@ -296,7 +259,6 @@ var Points0 = MG_fas_sample.map(function(fea){
   return fea.set('landcover',0)
 })
 
-
 //The remaining 10 categories were automatically generated according to the same idea
 
 //**********************************************************************Phyllite (PH) 千枚岩1
@@ -331,7 +293,6 @@ var PH_fas_sample = PH_mask.stratifiedSample({
 var Points1 = PH_fas_sample.map(function(fea){
   return fea.set('landcover',1)
 })
-
 
 //**********************************************************************Metaconglomerate and sandstone (MS) 变质砾岩、砂岩2 
 var MS = table5.filter(ee.Filter.eq("YSEB", '变质砾岩、砂岩'));
@@ -401,7 +362,6 @@ var Points3 = GG_fas_sample.map(function(fea){
   return fea.set('landcover',3)
 })
 
-
 //**********************************************************************Plagioclase gneiss (PLG) 斜长片麻岩4  
 var PLG = table5.filter(ee.Filter.eq("YSEB", '斜长片麻岩'));
 
@@ -434,7 +394,6 @@ var PLG_fa_sample = PLG_mask.stratifiedSample({
 var Points4 = PLG_fa_sample.map(function(fea){
   return fea.set('landcover',4)
 })
-
 
 //**********************************************************************Plagiogranite (PL) 斜长花岗岩5  
 var PL = table5.filter(ee.Filter.eq("YSEB", '斜长花岗岩'));
@@ -504,8 +463,6 @@ var Points6 = RG_fa_sample.map(function(fea){
   
 })
 
-
-
 //**********************************************************************Silty slate and sandstone (SS) 粉砂质板岩、砂岩7 
 var SS = table5.filter(ee.Filter.eq("YSEB", '粉砂质板岩、砂岩'));
 
@@ -542,7 +499,6 @@ var Points7 = SS_fa_sample.map(function(fea){
 
 var styling={color:'red',fillColor:'00000000'}
 
-
 //**********************************************************************Argillite and sandstone (AS) 粘土岩、砂岩8 
 var AS = table5.filter(ee.Filter.eq("YSEB",'粘土岩-砂岩'));
 
@@ -576,8 +532,6 @@ var Points8 = AS_fa_sample.map(function(fea){
   return fea.set('landcover',8)
   
 })
-
-
 
 //**********************************************************************Potassic granite (POG) 钾长花岗岩9
 var POG = table5.filter(ee.Filter.eq("YSEB",'钾长花岗岩'));
