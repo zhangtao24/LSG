@@ -1,0 +1,362 @@
+/****************table6 shows the scope of the study area***********/
+
+var roi= table6;
+var region = roi.geometry().bounds()
+Map.centerObject(roi,8)
+// print(roi.area())
+
+//********************************************************************************Sentinel-2
+// remove cloud from Sentinel-2
+function rmS2cloud(image) {
+  var qa = image.select('QA60');
+
+  // Bits 10 and 11 are clouds and cirrus, respectively.
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  // Both flags should be set to zero, indicating clear conditions.
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+      .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+  // var mask2 = image.select('B2').lte(2000);
+  return image.updateMask(mask).toDouble().divide(10000)
+              .copyProperties(image, ["system:time_start", "system:time_end"]);
+}
+
+var LL_clipped = ee.ImageCollection('COPERNICUS/S2_SR_HARMONIZED')
+                  .filterBounds(roi)
+                  .filterDate('2021-05-01','2021-10-30') 
+                  // Pre-filter to get less cloudy granules.
+                  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE',20))  //云量
+                  .select('B1','B2','B3','B4','B5','B6','B7','B8','B8A','B9','B11','B12','QA60')
+                  .map(rmS2cloud)
+                  .median()
+                  .clip(roi)
+                  
+Map.addLayer(LL_clipped, {bands: ['B4', 'B3', 'B2'], max: 0.5, gamma: 2}, 'S2 Image',false);
+
+
+//***********************************************************************************landsat
+
+function rmCloud_TOA(image) {
+  var CloudScore = ee.Algorithms.Landsat.simpleCloudScore(image);
+  var image_rm =CloudScore.select("cloud").lte(30);
+  return image.updateMask(image_rm);
+}
+
+
+var l8SR = ee.ImageCollection('LANDSAT/LC08/C02/T1_TOA')
+                  .filterBounds(roi)
+                  .filterDate('2020-05-01','2020-10-30')
+                  .map(rmCloud_TOA)
+                  .select('B1','B2','B3','B4','B5','B6','B7','B8','B9','B10','B11')
+                  .median()   //中值合成
+                  .clip(roi)
+
+// print("l8SR",l8SR)
+
+var rgbVis = {
+  min: 0.0,
+  max: 0.3,
+  gamma: 1.4,
+  bands: ['B4', 'B3', 'B2'],
+};
+
+Map.addLayer(l8SR, rgbVis, 'l8SR',false);
+
+var b67 = l8SR.expression('(REDe / RED)', {
+        'REDe': l8SR.select('B6'),
+        'RED': l8SR.select('B7')})
+        .rename('red').float();
+        
+
+var b64 = l8SR.expression('(RED3 / RED2)', {
+        'RED3': l8SR.select('B6'),
+        'RED2': l8SR.select('B4')})
+        .rename('bule').float();
+        
+
+var b42 = l8SR.expression('(RED4 / RED5)', {
+        'RED4': l8SR.select('B4'),
+        'RED5': l8SR.select('B2')})
+        .rename('huagang').float();
+        
+
+//*********************************************************************************PCA
+var bands1=["B2","B3","B4","B8","B11","B12"]
+// 定义一个函数，用于对矢量进行矩形分块
+function shpRectBlock(vector, numHorizontal, numVertical) {  
+  // 检查输入是否为矢量  
+  if (!(vector instanceof ee.Geometry || vector instanceof ee.Feature || vector instanceof ee.FeatureCollection)) {  
+    throw new Error('Input must be a Geometry, Feature, or FeatureCollection.');  
+  }  
+
+
+  // 如果是 FeatureCollection，提取其几何  
+  if (vector instanceof ee.FeatureCollection) {  
+    vector = vector.geometry();  
+  } 
+  else if (vector instanceof ee.Feature) {  
+    vector = vector.geometry();  
+  }
+  else {
+    vector = vector;
+  }
+
+  // 获取矢量的边界框  
+  var bounds = vector.bounds();  
+  var coords = ee.List(bounds.coordinates().get(0)); // 获取边界框的坐标  
+  var xmin = ee.Number(ee.List(coords.get(0)).get(0));  
+  var ymin = ee.Number(ee.List(coords.get(0)).get(1));  
+  var xmax = ee.Number(ee.List(coords.get(2)).get(0));  
+  var ymax = ee.Number(ee.List(coords.get(2)).get(1));  
+
+
+  // 计算每个矩形块的宽度和高度  
+  var xStep = xmax.subtract(xmin).divide(numHorizontal);  
+  var yStep = ymax.subtract(ymin).divide(numVertical);  
+
+
+  // 创建矩形块  
+  var rectangles = ee.List.sequence(0, numHorizontal - 1).map(function (i) {  
+    return ee.List.sequence(0, numVertical - 1).map(function (j) {  
+      var x0 = xmin.add(xStep.multiply(i));  
+      var x1 = x0.add(xStep);  
+      var y0 = ymin.add(yStep.multiply(j));  
+      var y1 = y0.add(yStep);
+      var tmpGeo = ee.Geometry.Rectangle([x0, y0, x1, y1]);
+      var GeoCommon = tmpGeo.intersection(vector,1);
+      // return ee.Feature(ee.Geometry.Rectangle([x0, y0, x1, y1]));
+      return ee.Feature(GeoCommon);
+    });  
+  }).flatten();  
+
+
+  // 将矩形块转换为 FeatureCollection  
+  var rectanglesFC = ee.FeatureCollection(rectangles).filterBounds(vector);  
+
+
+  return rectanglesFC;  
+}
+
+function pca (img) {
+    var bandNames = bands1;
+    var scale = 60;
+    var region = roi;
+    var year = img.get('year');
+
+
+    var meanDict = img.reduceRegion({
+        reducer: ee.Reducer.mean(),
+        geometry: region,
+        scale: scale,
+        maxPixels: 10e13
+    });
+    var means = ee.Image.constant(meanDict.values(bandNames));
+    var centered = img.subtract(means);
+
+
+    var getNewBandNames = function(prefix) {
+        var seq = ee.List.sequence(1, 6);
+        return seq.map(function(n) {
+            return ee.String(prefix).cat(ee.Number(n).int());
+        });
+    };
+
+
+    var getPrincipalComponents = function(centered, scale, region) {
+        var arrays = centered.toArray();
+        // 添加波段权重
+        var weights = ee.Array([1, 1, 1, 1, 2 ,2]); // 根据实际波段数量调整
+        arrays = arrays.multiply(weights);
+
+
+        var covar = arrays.reduceRegion({
+            reducer: ee.Reducer.centeredCovariance(),
+            geometry: region,
+            scale: scale,
+            bestEffort: true,
+            maxPixels: 10e13
+        });
+        var covarArray = ee.Array(covar.get('array'));
+
+        var eigens = covarArray.eigen();
+        var eigenValues = eigens.slice(1, 0, 1);
+        var eigenVectors = eigens.slice(1, 1);
+
+
+        var eigenValuesList = eigenValues.toList().flatten();
+        var total = eigenValuesList.reduce(ee.Reducer.sum());
+        var percentageVariance = eigenValuesList.map(function(item) {
+            return (ee.Number(item).divide(total)).multiply(100).format('%.2f');
+        });
+
+
+        var arrayImage = arrays.toArray(1);
+        var principalComponents = ee.Image(eigenVectors).matrixMultiply(arrayImage);
+
+
+        var sdImage = ee.Image(eigenValues.sqrt())
+            .arrayProject([0]).arrayFlatten([getNewBandNames('SD')]);
+
+        return principalComponents
+            .arrayProject([0])
+            .arrayFlatten([getNewBandNames('PC', bandNames)])
+            .divide(sdImage)
+            .set('eigensValue', eigenValuesList)
+            .set('eigenVectors', eigenVectors)
+            .set('各个主成分的所占总信息量比例', percentageVariance);
+    };
+
+    img = getPrincipalComponents(centered,scale, region);
+    return img;
+}
+var pcImage = pca(LL_clipped.select(bands1));  // 使用主成分分析函数处理影像
+
+var pcImage1=pcImage.select('PC3', 'PC2', 'PC1')
+
+var pc1 = pcImage1.select('PC1');
+var pc2 = pcImage1.select('PC2');
+var pc3 = pcImage1.select('PC3');
+var B11 = l8SR.select('B11');
+
+Map.addLayer(
+  pcImage, 
+  {bands: ['PC3', 'PC2', 'PC1'], min: -2, max: 2}, 
+  'PCA', 
+  false
+);
+//***************************************************************************DEM
+var dataset = ee.Image('USGS/SRTMGL1_003')
+                .clip(roi);
+var terrain = ee.Algorithms.Terrain(dataset);
+
+var l8SR1 = l8SR.addBands(b64).addBands(b67).addBands(b42);
+
+var LL_clipped1=ee.Image.cat([l8SR1,LL_clipped,terrain,pcImage])
+
+print(LL_clipped1)
+
+var bands = ['B1','B2', 'B3', 'B4', 'B5', 'B6', 
+'B7','B8','B10','B9','B11','elevation','slope','aspect','hillshade','B1_1','B2_1','B3_1','B4_1','B5_1'
+,'B6_1','B7_1','B8_1','B8A','B9_1','B11_1','B12','bule','red','huagang','pc1','pc2','pc3'];
+
+/****************"sample" refers to the training sample points automatically generated using the sample generation code***********/
+var k = 5;
+var collection = sample.randomColumn('random').map(function(f) {
+  return f.set('fold', ee.Number(f.get('random')).multiply(k).floor());
+});
+
+var folds = collection.distinct('fold').select('fold');
+
+for (var i = 0; i < k; i++) {
+  var validation = folds.filter(ee.Filter.eq('fold', i));
+
+  var trainingPartition = collection.filter(ee.Filter.neq('fold', i));
+  var testingPartition = collection.filter(ee.Filter.eq('fold', i));
+  
+
+  var classifier_RF = ee.Classifier.smileRandomForest(200).setOutputMode('MULTIPROBABILITY');
+  var classifier_Cart = ee.Classifier.smileCart().setOutputMode('MULTIPROBABILITY');
+  var classifier_GTB = ee.Classifier.smileGradientTreeBoost(50).setOutputMode('MULTIPROBABILITY');
+  var classifier_MD = ee.Classifier.minimumDistance();
+
+  var trained_RF = classifier_RF.train(trainingPartition, 'landcover', bands);
+  var trained_Cart = classifier_Cart.train(trainingPartition, 'landcover', bands);
+  var trained_GTB = classifier_GTB.train(trainingPartition, 'landcover', bands);
+
+  var classified_RF = LL_clipped1.classify(trained_RF);
+  var classified_Cart = LL_clipped1.classify(trained_Cart);
+  var classified_GTB = LL_clipped1.classify(trained_GTB);
+
+  var classified_RF_C0 = classified_RF.arrayGet(0);
+  var classified_RF_C1 = classified_RF.arrayGet(1);
+  var classified_RF_C2 = classified_RF.arrayGet(2);
+  var classified_RF_C3 = classified_RF.arrayGet(3);
+  var classified_RF_C4 = classified_RF.arrayGet(4);
+  var classified_RF_C5 = classified_RF.arrayGet(5);
+  var classified_RF_C6 = classified_RF.arrayGet(6);
+  var classified_RF_C7 = classified_RF.arrayGet(7);
+  var classified_RF_C8 = classified_RF.arrayGet(8);
+  var classified_RF_C9 = classified_RF.arrayGet(9);
+  var classified_RF_C10 = classified_RF.arrayGet(10);
+  
+  var classified_Cart_C0 = classified_Cart.arrayGet(0);
+  var classified_Cart_C1 = classified_Cart.arrayGet(1);
+  var classified_Cart_C2 = classified_Cart.arrayGet(2);
+  var classified_Cart_C3 = classified_Cart.arrayGet(3);
+  var classified_Cart_C4 = classified_Cart.arrayGet(4);
+  var classified_Cart_C5 = classified_Cart.arrayGet(5);
+  var classified_Cart_C6 = classified_Cart.arrayGet(6);
+  var classified_Cart_C7 = classified_Cart.arrayGet(7);
+  var classified_Cart_C8 = classified_Cart.arrayGet(8);
+  var classified_Cart_C9 = classified_Cart.arrayGet(9);
+  var classified_Cart_C10 = classified_Cart.arrayGet(10);
+  
+  var classified_GTB_C0 = classified_GTB.arrayGet(0);
+  var classified_GTB_C1 = classified_GTB.arrayGet(1);
+  var classified_GTB_C2 = classified_GTB.arrayGet(2);
+  var classified_GTB_C3 = classified_GTB.arrayGet(3);
+  var classified_GTB_C4 = classified_GTB.arrayGet(4);
+  var classified_GTB_C5 = classified_GTB.arrayGet(5);
+  var classified_GTB_C6 = classified_GTB.arrayGet(6);
+  var classified_GTB_C7 = classified_GTB.arrayGet(7);
+  var classified_GTB_C8 = classified_GTB.arrayGet(8);
+  var classified_GTB_C9 = classified_GTB.arrayGet(9);
+  var classified_GTB_C10 = classified_GTB.arrayGet(10);
+  var classified_Stack = classified_RF_C0.addBands(classified_RF_C1).addBands(classified_RF_C2).addBands(classified_RF_C3).addBands(classified_RF_C4).addBands(classified_RF_C5).addBands(classified_RF_C6).addBands(classified_RF_C7).addBands(classified_RF_C8).addBands(classified_RF_C9).addBands(classified_RF_C10)
+          .addBands(classified_Cart_C0).addBands(classified_Cart_C1).addBands(classified_Cart_C2).addBands(classified_Cart_C3).addBands(classified_Cart_C4).addBands(classified_Cart_C5).addBands(classified_Cart_C6).addBands(classified_Cart_C7).addBands(classified_Cart_C8).addBands(classified_Cart_C9).addBands(classified_Cart_C10)
+          .addBands(classified_GTB_C0).addBands(classified_GTB_C1).addBands(classified_GTB_C2).addBands(classified_GTB_C3).addBands(classified_GTB_C4).addBands(classified_GTB_C5).addBands(classified_GTB_C6).addBands(classified_GTB_C7).addBands(classified_GTB_C8).addBands(classified_GTB_C9).addBands(classified_GTB_C10)
+
+Export.classifier.toAsset({
+     classifier: classified_Stack,
+     description: 'Stack_model',
+     assetId: 'Stack_model'
+ })
+
+
+var bandnames_MD = classified_Stack.bandNames();
+print(bandnames_MD)
+
+var training_MD = classified_Stack.sampleRegions({
+collection:trainingPartition,
+properties: ['landcover'],
+scale: 30,
+tileScale:16,
+geometries:true
+});
+
+var trained_MD = classifier_MD.train(training_MD, 'landcover', bandnames_MD);
+var classified_MD = classified_Stack.classify(trained_MD);
+
+var testing_MD = classified_MD.sampleRegions({
+collection:testingPartition,
+properties: ['landcover'],
+scale: 30,
+tileScale:16,
+geometries:true
+});
+
+var confusionMatrix = testing_MD.errorMatrix('landcover', 'classification');
+  
+// 计算平均ua
+var uaarray = ee.Array(confusionMatrix.consumersAccuracy());
+var ua1 = uaarray.toList().flatten();
+var ua = ua1.reduce(ee.Reducer.mean());
+
+// 计算平均pa
+var paarray = ee.Array(confusionMatrix.producersAccuracy());
+var pa1 = paarray.toList().flatten();
+var pa = pa1.reduce(ee.Reducer.mean());
+
+var f1Score = ee.Number(2).multiply(pa).multiply(ua).divide(ee.Number(pa).add(ua));
+
+  print('Fold ' + i + ':');
+  print('Validation Set Size (Fold ' + i + '):', testingPartition.size());
+  print('confusionMatrix',confusionMatrix);
+  print('overall accuracy', confusionMatrix.accuracy());
+  print('consumers accuracy',confusionMatrix.consumersAccuracy());
+  print('producers accuracy',confusionMatrix.producersAccuracy());
+  print('F1 Score:', f1Score);
+
+}
+
