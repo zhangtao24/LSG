@@ -74,13 +74,13 @@ var b42 = l8SR.expression('(RED4 / RED5)', {
 //*********************************************************************************PCA
 var bands1=["B2","B3","B4","B8","B11","B12"]
 
-// 定义一个函数，用于对矢量进行矩形分块
+// Define a function for rectangular blocking of a vector
 function shpRectBlock(vector, numHorizontal, numVertical) {  
-  // 检查输入是否为矢量  
+  // Check whether the input is a vector
   if (!(vector instanceof ee.Geometry || vector instanceof ee.Feature || vector instanceof ee.FeatureCollection)) {  
     throw new Error('Input must be a Geometry, Feature, or FeatureCollection.');  
   }  
-  // 如果是 FeatureCollection，提取其几何  
+// If it is a FeatureCollection, extract its geometry
   if (vector instanceof ee.FeatureCollection) {  
     vector = vector.geometry();  
   } 
@@ -90,7 +90,7 @@ function shpRectBlock(vector, numHorizontal, numVertical) {  
   else {
     vector = vector;
   }
-  // 获取矢量的边界框  
+// Obtain the bounding box of the vector
   var bounds = vector.bounds();  
   var coords = ee.List(bounds.coordinates().get(0)); // 获取边界框的坐标  
   var xmin = ee.Number(ee.List(coords.get(0)).get(0));  
@@ -98,11 +98,11 @@ function shpRectBlock(vector, numHorizontal, numVertical) {  
   var xmax = ee.Number(ee.List(coords.get(2)).get(0));  
   var ymax = ee.Number(ee.List(coords.get(2)).get(1));  
 
-  // 计算每个矩形块的宽度和高度  
+Calculate the width and height of each rectangular block
   var xStep = xmax.subtract(xmin).divide(numHorizontal);  
   var yStep = ymax.subtract(ymin).divide(numVertical);  
 
-  // 创建矩形块  
+// Create a rectangular block
   var rectangles = ee.List.sequence(0, numHorizontal - 1).map(function (i) {  
     return ee.List.sequence(0, numVertical - 1).map(function (j) {  
       var x0 = xmin.add(xStep.multiply(i));  
@@ -116,7 +116,7 @@ function shpRectBlock(vector, numHorizontal, numVertical) {  
     });  
   }).flatten();  
 
-  // 将矩形块转换为 FeatureCollection  
+// Convert the rectangular block to FeatureCollection
   var rectanglesFC = ee.FeatureCollection(rectangles).filterBounds(vector);  
 
   return rectanglesFC;  
@@ -143,8 +143,8 @@ function pca (img) {
 
     var getPrincipalComponents = function(centered, scale, region) {
         var arrays = centered.toArray();
-        // 添加波段权重
-        var weights = ee.Array([1, 1, 1, 1, 2 ,2]); // 根据实际波段数量调整
+        // Add band weights
+        var weights = ee.Array([1, 1, 1, 1, 2 ,2]); // It can be adjusted according to the actual number of bands
         arrays = arrays.multiply(weights);
         var covar = arrays.reduceRegion({
             reducer: ee.Reducer.centeredCovariance(),
@@ -178,7 +178,7 @@ function pca (img) {
     img = getPrincipalComponents(centered,scale, region);
     return img;
 }
-var pcImage = pca(LL_clipped.select(bands1));  // 使用主成分分析函数处理影像
+var pcImage = pca(LL_clipped.select(bands1));  // Process the image using the principal component analysis function
 
 var pcImage1=pcImage.select('PC3', 'PC2', 'PC1')
 
@@ -220,7 +220,7 @@ and a total of 13,200 training data were generated for 11 categories.
 The number of sample points generated can be customized according to your needs.
 */
 
-//**********************************************************************Monzogranite (MG) 二长花岗岩0 
+//**********************************************************************Monzogranite (MG)
 //Get the MG in T1
 var MG = table5.filter(ee.Filter.eq("YSEB", '二长花岗岩'));
 
@@ -261,7 +261,7 @@ var Points0 = MG_fas_sample.map(function(fea){
 
 //The remaining 10 categories were automatically generated according to the same idea
 
-//**********************************************************************Phyllite (PH) 千枚岩1
+//**********************************************************************Phyllite (PH) 
 var PH = table5.filter(ee.Filter.eq("YSEB", '千枚岩'));
 
 var PH1 = pc1.gt(0.5).and(pc1.lte(1.5))
@@ -294,7 +294,7 @@ var Points1 = PH_fas_sample.map(function(fea){
   return fea.set('landcover',1)
 })
 
-//**********************************************************************Metaconglomerate and sandstone (MS) 变质砾岩、砂岩2 
+//**********************************************************************Metaconglomerate and sandstone (MS) 
 var MS = table5.filter(ee.Filter.eq("YSEB", '变质砾岩、砂岩'));
 
 var MS1 = pc1.gt(1.5).and(pc1.lte(3))
@@ -329,7 +329,7 @@ var Points2 = MS_fa_sample.map(function(fea){
 
 Map.addLayer(MS, {'palette':['#7a34d6']}, 'MS')
 Map.addLayer(Points2, {'palette':['green']}, 'Metaconglomerate and sandstone');
-//**********************************************************************Graphic granite (GG) 文象花岗岩3  
+//**********************************************************************Graphic granite (GG)
 var GG = table5.filter(ee.Filter.eq("YSEB", '文象花岗岩'));
 
 var GG1 = pc1.gt(-1).and(pc1.lte(0.5))
@@ -362,7 +362,7 @@ var Points3 = GG_fas_sample.map(function(fea){
   return fea.set('landcover',3)
 })
 
-//**********************************************************************Plagioclase gneiss (PLG) 斜长片麻岩4  
+//**********************************************************************Plagioclase gneiss (PLG) 
 var PLG = table5.filter(ee.Filter.eq("YSEB", '斜长片麻岩'));
 
 var PLG1 = pc1.gt(-0.9).and(pc1.lte(0.5))
@@ -395,7 +395,7 @@ var Points4 = PLG_fa_sample.map(function(fea){
   return fea.set('landcover',4)
 })
 
-//**********************************************************************Plagiogranite (PL) 斜长花岗岩5  
+//**********************************************************************Plagiogranite (PL)
 var PL = table5.filter(ee.Filter.eq("YSEB", '斜长花岗岩'));
 
 var PL1 = pc1.gt(-1.2).and(pc1.lte(0.5))
@@ -429,7 +429,7 @@ var Points5 = PL_fa_sample.map(function(fea){
   
 })
 
-//**********************************************************************Rhyolite porphyry (RG) 流纹斑岩6 
+//**********************************************************************Rhyolite porphyry (RG) 
 var RG = table5.filter(ee.Filter.eq("YSEB", '流纹斑岩'));
 
 var RG1 = pc1.gt(1).and(pc1.lte(2))
@@ -463,7 +463,7 @@ var Points6 = RG_fa_sample.map(function(fea){
   
 })
 
-//**********************************************************************Silty slate and sandstone (SS) 粉砂质板岩、砂岩7 
+//**********************************************************************Silty slate and sandstone (SS) 
 var SS = table5.filter(ee.Filter.eq("YSEB", '粉砂质板岩、砂岩'));
 
 var SS1 = pc1.gt(1.5).and(pc1.lte(3))
@@ -499,7 +499,7 @@ var Points7 = SS_fa_sample.map(function(fea){
 
 var styling={color:'red',fillColor:'00000000'}
 
-//**********************************************************************Argillite and sandstone (AS) 粘土岩、砂岩8 
+//**********************************************************************Argillite and sandstone (AS) 
 var AS = table5.filter(ee.Filter.eq("YSEB",'粘土岩-砂岩'));
 
 var AS1 = pc1.gt(-1.5).and(pc1.lte(1))
@@ -533,7 +533,7 @@ var Points8 = AS_fa_sample.map(function(fea){
   
 })
 
-//**********************************************************************Potassic granite (POG) 钾长花岗岩9
+//**********************************************************************Potassic granite (POG) 
 var POG = table5.filter(ee.Filter.eq("YSEB",'钾长花岗岩'));
 
 var POG1 = pc1.gt(-0.4).and(pc1.lte(0.8))
@@ -566,7 +566,7 @@ var Points9 = POG_fa_sample.map(function(fea){
   return fea.set('landcover',9)
   })
 
-//**********************************************************************Granodiorite (GR) 花岗闪长岩10
+//**********************************************************************Granodiorite (GR) 
 var GR = table5.filter(ee.Filter.eq("YSEB",'花岗闪长岩'));
 
 var GR1 = pc1.gt(-0.25).and(pc1.lte(1.25))
