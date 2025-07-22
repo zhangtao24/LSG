@@ -83,99 +83,149 @@ var b42 = l8SR.expression('(RED4 / RED5)', {
         
 //*********************************************************************************PCA
 
-var getNewBandNames = function(prefix) {
-    var seq = ee.List.sequence(1, bandNames.length());
-    return seq.map(function(b) {
-      return ee.String(prefix).cat(ee.Number(b).int());
-    });
-  };
-
-//Principal component analysis function
-var getPrincipalComponents = function(centered, scale, region) {
-    // The image is converted into a one-dimensional array
-    var arrays = centered.toArray();
-    // Calculate the correlation coefficient matrix
-    var covar = arrays.reduceRegion({
-      reducer: ee.Reducer.centeredCovariance(),
-      geometry: region,
-      scale: scale,
-      maxPixels: 1e9
-    });
-  
-    // Gets the "array" covariance result and converts it to an array
-    // Covariance between bands
-    var covarArray = ee.Array(covar.get('array'));
-  
-    // Perform feature analysis and segment values and vectors
-    var eigens = covarArray.eigen();
-
-    // The length of the p-vector of the eigenvalue
-    var eigenValues = eigens.slice(1, 0, 1);
-    
-    //Calculate the principal component load
-    var eigenValuesList = eigenValues.toList().flatten()
-    var total = eigenValuesList.reduce(ee.Reducer.sum())
-    var percentageVariance = eigenValuesList.map(function(item) {
-      return (ee.Number(item).divide(total)).multiply(100).format('%.2f')
-    })
-    
-    // print("各个主成分的所占总信息量比例", percentageVariance)  
-      
-    // PxP matrix, whose eigenvectors are rows.
-    var eigenVectors = eigens.slice(1, 1);
-    
-    // Convert the image to a two-dimensional array
-    var arrayImage = arrays.toArray(1);
-    
-    //The image array is left multiplied by the eigenvector matrix
-    var principalComponents = ee.Image(eigenVectors).matrixMultiply(arrayImage);
-
-    // Convert the square root of the eigenvalues to a P-band image.
-    var sdImage = ee.Image(eigenValues.sqrt())
-      .arrayProject([0]).arrayFlatten([getNewBandNames('sd')]);
-      
-    //Convert PC to P-band image, standardized by SD.
-    principalComponents=principalComponents
-      // Throw an unwanted dimension, [[]]->[]。
-      .arrayProject([0])
-      // Make the single band array image a multi-band image,[]->image。
-      .arrayFlatten([getNewBandNames('pc')])
-      // Normalize PC with SDs.
-      .divide(sdImage);
-    return principalComponents
-  };
+// 定义一个函数，用于对矢量进行矩形分块
+function shpRectBlock(vector, numHorizontal, numVertical) {  
+  // 检查输入是否为矢量  
+  if (!(vector instanceof ee.Geometry || vector instanceof ee.Feature || vector instanceof ee.FeatureCollection)) {  
+    throw new Error('Input must be a Geometry, Feature, or FeatureCollection.');  
+  }  
 
 
-//Band selection for principal component analysis is required
-var bands1=["B2","B3","B4","B8",'B8A',"B11","B12"]
-var LL_clipped1 =LL_clipped.select(bands1)
+  // 如果是 FeatureCollection，提取其几何  
+  if (vector instanceof ee.FeatureCollection) {  
+    vector = vector.geometry();  
+  } 
+  else if (vector instanceof ee.Feature) {  
+    vector = vector.geometry();  
+  }
+  else {
+    vector = vector;
+  }
 
-// Enter parameter Settings to the principal component function
-var region = roi;
-var image =  LL_clipped1.select(bands1);
-var scale = 60;
-var bandNames = image.bandNames();
+  // 获取矢量的边界框  
+  var bounds = vector.bounds();  
+  var coords = ee.List(bounds.coordinates().get(0)); // 获取边界框的坐标  
+  var xmin = ee.Number(ee.List(coords.get(0)).get(0));  
+  var ymin = ee.Number(ee.List(coords.get(0)).get(1));  
+  var xmax = ee.Number(ee.List(coords.get(2)).get(0));  
+  var ymax = ee.Number(ee.List(coords.get(2)).get(1));  
 
-//Data averaging (to facilitate subsequent covariance reduction and SD extension)
-var meanDict = image.reduceRegion({
-    reducer: ee.Reducer.mean(),
-    geometry: region,
-    scale: scale,
-    maxPixels: 1e9
-});
-var means = ee.Image.constant(meanDict.values(bandNames));
-var centered = image.subtract(means);
 
-//Principal component analysis was carried out and the analysis results were obtained
-var pcImage = getPrincipalComponents(centered, scale, region);
+  // 计算每个矩形块的宽度和高度  
+  var xStep = xmax.subtract(xmin).divide(numHorizontal);  
+  var yStep = ymax.subtract(ymin).divide(numVertical);  
 
-var pc1 = pcImage.select('pc1');
-var pc2 = pcImage.select('pc2');
-var pc3 = pcImage.select('pc3');
 
-// Principal component visualization
-Map.addLayer(pcImage, {bands: ['pc3', 'pc2', 'pc1'], min: -2, max: 2}, 'Sentinel 2 - PCA');
+  // 创建矩形块  
+  var rectangles = ee.List.sequence(0, numHorizontal - 1).map(function (i) {  
+    return ee.List.sequence(0, numVertical - 1).map(function (j) {  
+      var x0 = xmin.add(xStep.multiply(i));  
+      var x1 = x0.add(xStep);  
+      var y0 = ymin.add(yStep.multiply(j));  
+      var y1 = y0.add(yStep);
+      var tmpGeo = ee.Geometry.Rectangle([x0, y0, x1, y1]);
+      var GeoCommon = tmpGeo.intersection(vector,1);
+      // return ee.Feature(ee.Geometry.Rectangle([x0, y0, x1, y1]));
+      return ee.Feature(GeoCommon);
+    });  
+  }).flatten();  
 
+
+  // 将矩形块转换为 FeatureCollection  
+  var rectanglesFC = ee.FeatureCollection(rectangles).filterBounds(vector);  
+
+
+  return rectanglesFC;  
+}
+
+function pca (img) {
+    var bandNames = bands1;
+    var scale = 60;
+    var region = roi;
+    var year = img.get('year');
+
+
+    var meanDict = img.reduceRegion({
+        reducer: ee.Reducer.mean(),
+        geometry: region,
+        scale: scale,
+        maxPixels: 10e13
+    });
+    var means = ee.Image.constant(meanDict.values(bandNames));
+    var centered = img.subtract(means);
+
+
+    var getNewBandNames = function(prefix) {
+        var seq = ee.List.sequence(1, 6);
+        return seq.map(function(n) {
+            return ee.String(prefix).cat(ee.Number(n).int());
+        });
+    };
+
+
+    var getPrincipalComponents = function(centered, scale, region) {
+        var arrays = centered.toArray();
+        // 添加波段权重
+        var weights = ee.Array([1, 1, 1, 1, 2 ,2]); // 根据实际波段数量调整
+        arrays = arrays.multiply(weights);
+
+
+        var covar = arrays.reduceRegion({
+            reducer: ee.Reducer.centeredCovariance(),
+            geometry: region,
+            scale: scale,
+            bestEffort: true,
+            maxPixels: 10e13
+        });
+        var covarArray = ee.Array(covar.get('array'));
+
+        var eigens = covarArray.eigen();
+        var eigenValues = eigens.slice(1, 0, 1);
+        var eigenVectors = eigens.slice(1, 1);
+
+
+        var eigenValuesList = eigenValues.toList().flatten();
+        var total = eigenValuesList.reduce(ee.Reducer.sum());
+        var percentageVariance = eigenValuesList.map(function(item) {
+            return (ee.Number(item).divide(total)).multiply(100).format('%.2f');
+        });
+
+
+        var arrayImage = arrays.toArray(1);
+        var principalComponents = ee.Image(eigenVectors).matrixMultiply(arrayImage);
+
+
+        var sdImage = ee.Image(eigenValues.sqrt())
+            .arrayProject([0]).arrayFlatten([getNewBandNames('SD')]);
+
+
+        return principalComponents
+            .arrayProject([0])
+            .arrayFlatten([getNewBandNames('PC', bandNames)])
+            .divide(sdImage)
+            .set('eigensValue', eigenValuesList)
+            .set('eigenVectors', eigenVectors)
+            .set('各个主成分的所占总信息量比例', percentageVariance);
+    };
+
+    img = getPrincipalComponents(centered,scale, region);
+    return img;
+}
+var pcImage = pca(LL_clipped.select(bands1));  // 使用主成分分析函数处理影像
+
+var pcImage1=pcImage.select('PC3', 'PC2', 'PC1')
+
+var pc1 = pcImage1.select('PC1');
+var pc2 = pcImage1.select('PC2');
+var pc3 = pcImage1.select('PC3');
+var B11 = l8SR.select('B11');
+
+Map.addLayer(
+  pcImage, 
+  {bands: ['PC3', 'PC2', 'PC1'], min: -2, max: 2}, 
+  'Landsat 8 - PCA', 
+  false
+);
 
 //***************************************************************************DEM
 //Get dem data
