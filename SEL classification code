@@ -83,15 +83,14 @@ var b42 = l8SR.expression('(RED4 / RED5)', {
 
 //*********************************************************************************PCA
 var bands1=["B2","B3","B4","B8","B11","B12"]
-// 定义一个函数，用于对矢量进行矩形分块
+
+// Define a function for rectangular blocking of a vector
 function shpRectBlock(vector, numHorizontal, numVertical) {  
-  // 检查输入是否为矢量  
+  // Check whether the input is a vector
   if (!(vector instanceof ee.Geometry || vector instanceof ee.Feature || vector instanceof ee.FeatureCollection)) {  
     throw new Error('Input must be a Geometry, Feature, or FeatureCollection.');  
   }  
-
-
-  // 如果是 FeatureCollection，提取其几何  
+// If it is a FeatureCollection, extract its geometry
   if (vector instanceof ee.FeatureCollection) {  
     vector = vector.geometry();  
   } 
@@ -101,8 +100,7 @@ function shpRectBlock(vector, numHorizontal, numVertical) {  
   else {
     vector = vector;
   }
-
-  // 获取矢量的边界框  
+// Obtain the bounding box of the vector
   var bounds = vector.bounds();  
   var coords = ee.List(bounds.coordinates().get(0)); // 获取边界框的坐标  
   var xmin = ee.Number(ee.List(coords.get(0)).get(0));  
@@ -110,13 +108,11 @@ function shpRectBlock(vector, numHorizontal, numVertical) {  
   var xmax = ee.Number(ee.List(coords.get(2)).get(0));  
   var ymax = ee.Number(ee.List(coords.get(2)).get(1));  
 
-
-  // 计算每个矩形块的宽度和高度  
+Calculate the width and height of each rectangular block
   var xStep = xmax.subtract(xmin).divide(numHorizontal);  
   var yStep = ymax.subtract(ymin).divide(numVertical);  
 
-
-  // 创建矩形块  
+// Create a rectangular block
   var rectangles = ee.List.sequence(0, numHorizontal - 1).map(function (i) {  
     return ee.List.sequence(0, numVertical - 1).map(function (j) {  
       var x0 = xmin.add(xStep.multiply(i));  
@@ -130,21 +126,16 @@ function shpRectBlock(vector, numHorizontal, numVertical) {  
     });  
   }).flatten();  
 
-
-  // 将矩形块转换为 FeatureCollection  
+// Convert the rectangular block to FeatureCollection
   var rectanglesFC = ee.FeatureCollection(rectangles).filterBounds(vector);  
-
 
   return rectanglesFC;  
 }
-
 function pca (img) {
     var bandNames = bands1;
     var scale = 60;
     var region = roi;
     var year = img.get('year');
-
-
     var meanDict = img.reduceRegion({
         reducer: ee.Reducer.mean(),
         geometry: region,
@@ -153,8 +144,6 @@ function pca (img) {
     });
     var means = ee.Image.constant(meanDict.values(bandNames));
     var centered = img.subtract(means);
-
-
     var getNewBandNames = function(prefix) {
         var seq = ee.List.sequence(1, 6);
         return seq.map(function(n) {
@@ -162,14 +151,11 @@ function pca (img) {
         });
     };
 
-
     var getPrincipalComponents = function(centered, scale, region) {
         var arrays = centered.toArray();
-        // 添加波段权重
-        var weights = ee.Array([1, 1, 1, 1, 2 ,2]); // 根据实际波段数量调整
+        // Add band weights
+        var weights = ee.Array([1, 1, 1, 1, 2 ,2]); // It can be adjusted according to the actual number of bands
         arrays = arrays.multiply(weights);
-
-
         var covar = arrays.reduceRegion({
             reducer: ee.Reducer.centeredCovariance(),
             geometry: region,
@@ -182,22 +168,15 @@ function pca (img) {
         var eigens = covarArray.eigen();
         var eigenValues = eigens.slice(1, 0, 1);
         var eigenVectors = eigens.slice(1, 1);
-
-
         var eigenValuesList = eigenValues.toList().flatten();
         var total = eigenValuesList.reduce(ee.Reducer.sum());
         var percentageVariance = eigenValuesList.map(function(item) {
             return (ee.Number(item).divide(total)).multiply(100).format('%.2f');
         });
-
-
         var arrayImage = arrays.toArray(1);
         var principalComponents = ee.Image(eigenVectors).matrixMultiply(arrayImage);
-
-
         var sdImage = ee.Image(eigenValues.sqrt())
             .arrayProject([0]).arrayFlatten([getNewBandNames('SD')]);
-
         return principalComponents
             .arrayProject([0])
             .arrayFlatten([getNewBandNames('PC', bandNames)])
@@ -206,11 +185,10 @@ function pca (img) {
             .set('eigenVectors', eigenVectors)
             .set('各个主成分的所占总信息量比例', percentageVariance);
     };
-
     img = getPrincipalComponents(centered,scale, region);
     return img;
 }
-var pcImage = pca(LL_clipped.select(bands1));  // 使用主成分分析函数处理影像
+var pcImage = pca(LL_clipped.select(bands1));  // Process the image using the principal component analysis function
 
 var pcImage1=pcImage.select('PC3', 'PC2', 'PC1')
 
@@ -240,7 +218,9 @@ var bands = ['B1','B2', 'B3', 'B4', 'B5', 'B6',
 'B7','B8','B10','B9','B11','elevation','slope','aspect','hillshade','B1_1','B2_1','B3_1','B4_1','B5_1'
 ,'B6_1','B7_1','B8_1','B8A','B9_1','B11_1','B12','bule','red','huagang','pc1','pc2','pc3'];
 
-/****************"sample" refers to the training sample points automatically generated using the sample generation code***********/
+/****************"sample" refers to the training sample points 
+automatically generated using the sample generation code***********/
+
 var k = 5;
 var collection = sample.randomColumn('random').map(function(f) {
   return f.set('fold', ee.Number(f.get('random')).multiply(k).floor());
@@ -254,7 +234,7 @@ for (var i = 0; i < k; i++) {
   var trainingPartition = collection.filter(ee.Filter.neq('fold', i));
   var testingPartition = collection.filter(ee.Filter.eq('fold', i));
   
-
+  //Train the model
   var classifier_RF = ee.Classifier.smileRandomForest(200).setOutputMode('MULTIPROBABILITY');
   var classifier_Cart = ee.Classifier.smileCart().setOutputMode('MULTIPROBABILITY');
   var classifier_GTB = ee.Classifier.smileGradientTreeBoost(50).setOutputMode('MULTIPROBABILITY');
@@ -313,7 +293,6 @@ Export.classifier.toAsset({
      assetId: 'Stack_model'
  })
 
-
 var bandnames_MD = classified_Stack.bandNames();
 print(bandnames_MD)
 
@@ -338,12 +317,12 @@ geometries:true
 
 var confusionMatrix = testing_MD.errorMatrix('landcover', 'classification');
   
-// 计算平均ua
+// Calculate the average ua
 var uaarray = ee.Array(confusionMatrix.consumersAccuracy());
 var ua1 = uaarray.toList().flatten();
 var ua = ua1.reduce(ee.Reducer.mean());
 
-// 计算平均pa
+// Calculate the average pa
 var paarray = ee.Array(confusionMatrix.producersAccuracy());
 var pa1 = paarray.toList().flatten();
 var pa = pa1.reduce(ee.Reducer.mean());
